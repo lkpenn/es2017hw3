@@ -1,0 +1,146 @@
+---
+title: "hw3_clone"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##this code is from a Sierra Nevadan meadow vegetation project: https://github.com/meredith-csp/CALCC_Meadows
+
+# Quantify vegetation sensitivity to climate as weighted slope between veg and BCM climate metrics
+# This early approach has been replaced by factor analysis for variable reduction
+
+require(foreign)
+install.packages("doBy")
+require(doBy)
+require(plyr)
+require(changepoint)
+require(ggplot2)
+require(gridExtra)
+require(dplyr)
+require(reshape2)
+install.packages("geoR")
+setwd('E:\\Projects\\CALCC_SierraMeadows\\data\\working\\meadows_data_20170713')
+vdate = '20170713'
+
+
+
+### get period of record average vegetation index info
+sepvegvars<-read.csv(paste('meadows_',vdate,'_ndvwi_sepann.csv',sep=''))
+
+### get BCM summaries:
+#meadow:
+sepbcm<-read.csv('E:/Projects/CALCC_SierraMeadows/data/working/BCMClimateDataSummaries/septclimvars8516.csv')
+#watershed:
+sepbcm<-read.csv('E:/Projects/CALCC_SierraMeadows/data/working/BCMClimateDataSummaries/septBCMclimvars85_16_watershed.csv')
+
+### create site-year variable on BCM data (to join veg and climate data on)
+sepbcm$siteyear<-interaction(sepbcm$index,sepbcm$wy,sep="_")
+
+### filter out years with low  (<5) numbers of growing season NDVI observations - (change this to filter aug and sept, each? do earlier?)
+#GSDat<-subset(ltd3, DOY>=90 & DOY<=274)
+#summ<-summaryBy(NDVI_SURMEAN ~ ZONE_FID+YEAR, GSDat, FUN=c(length))
+#summ$filter<-ifelse(summ$NDVI_SUR.length>5,1,0)
+#summ$siteyear<-interaction(summ$YEAR,as.factor(summ$ZONE_FID))
+#p<-inner_join(p, summ,by = 'siteyear')
+#p<-subset(p, filter==1)
+
+### reformat long to wide by BCM climate variable
+sepbcmw <- dcast(sepbcm, index + wy + siteyear ~ climvar, value.var='value')   
+
+### derive AET:PET ratio variable
+#sepbcmw$apet <- sepbcmw$aet/sepbcmw$pet
+
+### join veg and climate data
+# Veg data based on FID, climate data based on MeadowIndex - Bring in cross-reference table:
+ind<-read.csv('E:\\Projects\\CALCC_SierraMeadows\\data\\working\\BCMClimateDataSummaries\\IndexRef.csv')
+ind <- ind[,c("FID","GRIDCODE")]
+for (i in c("FID","GRIDCODE")) {
+  ind[,i] = as.numeric(gsub(",","",ind[,i]))
+}
+isepbcmw <- left_join(sepbcmw,ind, by=c("index" = "GRIDCODE"))
+
+sepcdat <- merge(sepvegvars,isepbcmw,by='siteyear')
+
+### get slope of relationship between vegetation and climate - standardized values
+n<-levels(as.factor(sepcdat$index))
+sepcdatl<-sepcdat[,c(1,12,14,17:29)]
+sepcdatl$exc<-sepcdat$run+sepcdat$rch
+
+#Transform skewed, 0-bounded variables
+sk<-c("aet","pet","cwd","pck","ppt","rch","run","exc")
+for (j in sk) {
+     #sepcdatl[,j]<-log10(1+sepcdatl[,j])
+     sepcdatl[,j]<-log1p(sepcdatl[,j])
+}
+zsepcdat<-sepcdatl         #Note: pck, run distributions are problematic - lots of poorly-transformed zeroes
+vveg<-c("NDVI_SUR.mean.y","NDWI_NS.mean.y"); vclim<-c("aet","cwd","pck","pet","ppt","rch","run","exc")
+for (j in vclim) {
+     zsepcdat[,j]<-(zsepcdat[,j]-mean(zsepcdat[,j],na.rm=TRUE))/sd(zsepcdat[,j],na.rm=TRUE)
+}
+
+for (j in 1:length(n)){
+  a<-zsepcdat[which(zsepcdat$index==n[j]),]
+  sens<-matrix(NA,length(vclim),length(vveg))
+  for (k in 1:length(vveg)) {
+       for (l in 1:length(vclim)) {
+            if (length(a[,vclim[l]])-length(which(is.na(a[,vclim[k]])))>3) {
+            cor<-cor(a[,vveg[k]],a[,vclim[l]])
+            linmod<- lm(a[,vveg[k]]~a[,vclim[l]], na.action=na.omit)
+            sens[l,k]<-abs(cor*linmod$coefficients[2])
+            }
+       }
+  }
+  sens<-as.data.frame(sens)
+  colnames(sens)<-vveg; row.names(sens)<-vclim
+  t<-as.character(n[j])
+  sens$Index<-rep(t,nrow(sens))
+  write.csv(sens,file=paste('sens/vegBCMws_sep_wtsens_',vdate,n[j],'_092517.csv',sep=''))
+}
+
+### bind sensitivity files together and write to compiled file
+sepsens<-read.csv(paste('sens\\vegBCMws_sep_wtsens_',vdate,n[1],'_092517.csv',sep=''))   
+for(j in 2:length(n)){
+  f<-read.csv(paste('sens\\vegBCMws_sep_wtsens_',vdate,n[j],'_092517.csv',sep=''))
+  sepsens<-rbind(sepsens,f)
+  #file.remove(paste('sens/vegBCMws_sep_wtsens_',vdate,n[j],'_092517.csv',sep=''))
+}
+write.csv(sepsens,file=paste('sens/vegBCMws_sep_wtsens_',vdate,'_all_092517.csv',sep=''))
+
+### summarize mean/sd of correlations across meadows
+NDVI_csepw<-dcast(sepsens,Index ~ X, value.var = "NDVI_SUR.mean.y")
+NDWI_csepw<-dcast(sepsens,Index ~ X, value.var = "NDWI_NS.mean.y")
+NDVI_cseps <- NDVI_csepw[,2:9] %>% summarise_each(funs(mean(.,na.rm=TRUE),sd(.,na.rm=TRUE),sum(!(is.na(.)))))
+NDWI_cseps <- NDWI_csepw[,2:9] %>% summarise_each(funs(mean(.,na.rm=TRUE),sd(.,na.rm=TRUE),sum(!(is.na(.)))))
+
+### export un-summarized correlation values for veg metrics of interest
+write.csv(NDVI_csepw,paste('sens/vegBCMws_sepNDVI_sens_',vdate,'_092517.csv',sep=''))
+write.csv(NDWI_csepw,paste('sens/vegBCMws_sepNDWI_sens_',vdate,'_092517.csv',sep=''))
+
+### index summarized correlations by month and veg metric for plotting
+month = rep("9",2)
+veg = c("NDVI","NDWI_NS")
+sensumm <- rbind(NDVI_cseps,NDWI_cseps)
+sensumm$month <- month; sensumm$veg <- veg
+#Re-order for prettier plots:
+#varord<-c(1:7,13:14,16:17,8:12,15,18:19)
+#sensumm<-sensumm[,c(varord,19+varord,39:40)]
+
+### plot summaries
+#sensumm<-read.csv('sens/sensummBCM_091417.csv'); sensumm<-sensumm[,2:41]
+sensumml <- melt(sensumm, id.vars = c("veg"))
+#rearrange to separate means, sds, and n counts into separate columns
+nmetrics<-2; nslpvars<-8
+sensummr <- cbind(sensumml[1:(nmetrics*nslpvars),1:3],as.numeric(sensumml[(nmetrics*nslpvars+1):(nmetrics*nslpvars*2),3]),as.numeric(sensumml[(nmetrics*nslpvars*2+1):(nmetrics*nslpvars*3),3]))
+colnames(sensummr)<-c("veg","variable","mean","sd","n")
+sensummr$mean <- as.numeric(sensummr$mean)
+write.csv(sensummr,'sens/sensummBCMws_092517.csv')
+
+ggplot(sensummr, aes(x=veg, y=mean, fill=variable)) + 
+  geom_bar(position=position_dodge(), stat="identity") +
+  geom_errorbar(aes(ymin=mean-0.5*sd, ymax=mean+0.5*sd),
+                width=.2,                    # Width of the error bars
+                position=position_dodge(.9)) +
+  scale_y_continuous(limits=c(-0.005,0.015)) 
